@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+(
+  guix shell clang-toolchain\
+             cairo\
+             tcc\
+             make\
+             pkg-config\
+             libx11\
+             tree-sitter
+  :
+)
