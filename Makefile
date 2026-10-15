@@ -1,4 +1,5 @@
 SHELL:=/usr/bin/env bash
+load ./colorize.so
 
 CC=clang
 
@@ -9,6 +10,8 @@ LDLIBS=
 # shared library
 LDFLAGS+=-shared
 CFLAGS+=-fPIC
+CFLAGS+=-fno-omit-frame-pointer
+CFLAGS+=-fno-strict-aliasing
 
 
 # external dependencies
