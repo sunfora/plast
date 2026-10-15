@@ -182,7 +182,9 @@ bool next_token (struct shell_token *iter,
 static
 char* hook (const char* command)
 {
-  if (strncmp(command, "clang", strlen("clang")) == 0) {
+  if (strncmp(command, "clang", strlen("clang")) == 0) 
+  format_clang_compiler_flags:
+  {
     struct string  cmd_stack = make_string_from_cstring(command);
     struct string *cmd       = &cmd_stack;
     int   new_size     = cmd->size * 3;
@@ -221,10 +223,13 @@ char* hook (const char* command)
         }
       }
 
-      // new_text[j++] = '`'; 
+      // new_text[j++] = '`';
+      write_token:
       {
         const void *src  = &cmd->data[token->start];
         int64_t     size = token->size;
+
+        select_color:
         if (strncmp("-I", &cmd->data[token->start], 2) == 0) {
           token->color = 0xFFEAF8CE;
         } else if (strncmp("clang", &cmd->data[token->start], 5) == 0) {
@@ -242,6 +247,7 @@ char* hook (const char* command)
         } else {
           token->color = 0xFFffffff;
         }
+
         if (token->color) {
           struct terminal_color fmt = make_terminal_color(token->color);
           memcpy(&new_text[j], fmt.color_ansi, fmt.bytes);
