@@ -107,56 +107,56 @@ bool next_token (struct shell_token *iter,
     iter_stop = iter->stop;
   }
 
-  parse:
-  for (i = iter_stop; i < text->size; i++) {
-    if (text->data[i] != ' ') {
-      parse_token:
+  for (i = iter_stop; i < text->size; i++)
+  slide_towards_token:
+  {
+    if (text->data[i] != ' ') 
+    parse_token:
+    {
+      token->start = i;
+      switch (text->data[i]) 
       {
-        token->start = i;
-        switch (text->data[i]) 
+        case '"': 
+        parse_double_quote:
         {
-          case '"': 
-          parse_token_double_quote:
-          {
-            for (i = token->start; i < text->size; i++) {
-              if (text->data[i] == '"') {
-                token->stop = i;
-                goto send_back_ok;
-              }
-            } 
-            goto send_back_error;
-          } 
-          case '\'': 
-          parse_token_single_quote:
-          {
-            for (i = token->start; i < text->size; i++) {
-              if (text->data[i] == '\'') {
-                token->stop = i;
-                goto send_back_ok;
-              }
+          for (i = token->start; i < text->size; i++) {
+            if (text->data[i] == '"') {
+              token->stop = i;
+              goto send_back_ok;
             }
-            goto send_back_error;
+          } 
+          goto send_back_error;
+        } 
+        case '\'': 
+        parse_single_quote:
+        {
+          for (i = token->start; i < text->size; i++) {
+            if (text->data[i] == '\'') {
+              token->stop = i;
+              goto send_back_ok;
+            }
           }
-          default: 
-          parse_token_default:
-          {
-            for (i = token->start; i < text->size; i++) {
-              if (text->data[i] == ' ') {
-                token->stop = i;
-                goto send_back_ok;
-              }
-            }
-            token->stop = text->size;
-            goto send_back_ok;
-          } 
+          goto send_back_error;
         }
-        goto send_back_error; 
+        default: 
+        parse_unquoted:
+        {
+          for (i = token->start; i < text->size; i++) {
+            if (text->data[i] == ' ') {
+              token->stop = i;
+              goto send_back_ok;
+            }
+          }
+          token->stop = text->size;
+          goto send_back_ok;
+        } 
       }
-    } else {
-      parse_whitespace:
-      {
-        continue;
-      }
+      goto send_back_error; 
+    } 
+    else 
+    skip_whitespace:
+    {
+      continue;
     }
   }
   
