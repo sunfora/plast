@@ -1,5 +1,7 @@
 set -e
 
-gcc -shared -fPIC -O2 -g3 -o colorize.so colorize.c
-rm -rf libplast.so 
-/home/ivan/Projects/fork-open-source/make/make
+rm -rf colorize.so
+make -s colorize.so
+
+rm -rf libplast.so
+GNU_MAKE_USE_HOOKS=1 /home/ivan/Projects/fork-open-source/make/make

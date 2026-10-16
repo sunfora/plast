@@ -14,6 +14,29 @@ struct shell_token
   int64_t  size;
   char    *content;
   int32_t  color;
+  int64_t  state;
+};
+
+struct syntax
+{
+  union {
+    uint8_t slot[8];
+    int64_t all;
+  } layers;
+  void*   lookup;
+};
+
+enum parse_state : uint8_t {
+  PARSED_NOTHING = 0,
+  PARSED_OK      = 1,
+  PARSED_ERROR   = 3,
+  PARSED_PARTIAL = 4
+};
+
+enum syntax_type: uint8_t {
+  EMPTY = 0,
+  TOKEN = 1,
+  PUNCT = 2
 };
 
 struct terminal_color
@@ -71,16 +94,10 @@ make_terminal_color (int32_t color_bgra)
 }
 
 static inline
-struct shell_token
+void
 init_token (struct shell_token *self)
 {
-  *self = (struct shell_token) {
-    .start   = -1,
-    .stop    = -1,
-    .size    = 0,
-    .content = NULL,
-    .color   = 0x0  
-  };
+  *self = (struct shell_token) {0};
 }
 
 static inline
@@ -93,7 +110,8 @@ bool token_not_initialized(struct shell_token *self)
 }
 
 static
-bool next_token (struct shell_token *iter,
+bool next_token (struct syntax      *syntax,
+                 struct shell_token *iter,
                  struct string      *text)
 {
   struct shell_token  token_stack;
@@ -102,10 +120,8 @@ bool next_token (struct shell_token *iter,
   
   int64_t iter_stop = 0;
   int64_t i         = 0;
-
-  if (!token_not_initialized(iter)) {
-    iter_stop = iter->stop;
-  }
+  
+  iter_stop = iter->stop;
 
   for (i = iter_stop; i < text->size; i++)
   slide_towards_token:
@@ -113,31 +129,40 @@ bool next_token (struct shell_token *iter,
     if (text->data[i] != ' ') 
     parse_token:
     {
+
       token->start = i;
       switch (text->data[i]) 
       {
         case '"': 
-        parse_double_quote:
         {
-          for (i = token->start; i < text->size; i++) {
-            if (text->data[i] == '"') {
-              token->stop = i;
-              goto send_back_ok;
+          i = token->start;
+          parse_double_quote:
+          {
+            i += 1;
+            for (; i < text->size; i++) {
+              if (text->data[i] == '"') {
+                token->stop = i + 1;
+                goto send_back_partial;
+              }
             }
+            goto send_back_error;
           } 
-          goto send_back_error;
-        } 
+        } break;
         case '\'': 
-        parse_single_quote:
         {
-          for (i = token->start; i < text->size; i++) {
-            if (text->data[i] == '\'') {
-              token->stop = i;
-              goto send_back_ok;
-            }
+          i = token->start;
+          parse_single_quote:
+          {
+            i += 1;
+            for (; i < text->size; i++) {
+              if (text->data[i] == '\'') {
+                token->stop = i + 1;
+                goto send_back_partial;
+              }
+            } 
+            goto send_back_error;
           }
-          goto send_back_error;
-        }
+        } break;
         default: 
         parse_unquoted:
         {
@@ -145,6 +170,14 @@ bool next_token (struct shell_token *iter,
             if (text->data[i] == ' ') {
               token->stop = i;
               goto send_back_ok;
+            }
+            if (text->data[i] == '"') {
+              token->stop = i;
+              goto send_back_partial;
+            }
+            if (text->data[i] == '\'') {
+              token->stop = i;
+              goto send_back_partial;
             }
           }
           token->stop = text->size;
@@ -154,24 +187,49 @@ bool next_token (struct shell_token *iter,
       goto send_back_error; 
     } 
     else 
-    skip_whitespace:
+    whitespace:
     {
+      if (iter->state == PARSED_PARTIAL) {
+        token->stop = i;
+        goto send_back_ok;
+      }
       continue;
     }
   }
   
   send_back_nothing:
   {
+    token->state = PARSED_NOTHING;
     return false;
   }
 
   send_back_error:
   {
+    token->state   = PARSED_ERROR;
+    token->size    = token->stop - token->start;
+    token->content = iter->content;
+    memcpy(iter, token, sizeof(struct shell_token));
     return false;
+  }
+  
+  send_back_partial:
+  { 
+    if (iter->state == PARSED_PARTIAL) {
+      token->start = iter->start;
+    }
+    token->state   = PARSED_PARTIAL;
+    token->size    = token->stop - token->start;
+    token->content = iter->content;
+    memcpy(iter, token, sizeof(struct shell_token));
+    return true;
   }
 
   send_back_ok:
   {
+    if (iter->state == PARSED_PARTIAL) {
+      token->start = iter->start;
+    }
+    token->state   = PARSED_OK;
     token->size    = token->stop - token->start;
     token->content = iter->content;
     memcpy(iter, token, sizeof(struct shell_token));
@@ -179,16 +237,20 @@ bool next_token (struct shell_token *iter,
   }
 }
 
+
 static
 char* hook (const char* command)
 {
   if (strncmp(command, "clang", strlen("clang")) == 0) 
-  format_clang_compiler_flags:
+  format_clang:
   {
     struct string  cmd_stack = make_string_from_cstring(command);
     struct string *cmd       = &cmd_stack;
     int   new_size     = cmd->size * 3;
     char* new_text     = gmk_alloc(new_size);
+
+    struct syntax* syntax = malloc(cmd->size * sizeof(struct syntax));
+    memset(syntax, 0, cmd->size * sizeof(struct syntax));
     
     int j = 0;
       
@@ -198,7 +260,42 @@ char* hook (const char* command)
     
     int32_t iteration = 0;
     bool    flat      = false;
-    while (next_token(token, cmd)) {
+
+    fetch_event:
+    while (next_token(syntax, token, cmd)) {
+      
+      log:
+      if (0) {
+        int buf_size = token->size + 1;
+        char buf[buf_size];
+        memset(buf, 0, buf_size);
+        snprintf(
+          buf, buf_size, 
+          "%.*s", 
+          (int) token->size, &cmd->data[token->start]
+        );
+        printf("%2.ld ", token->size);
+        switch (token->state) {
+          case PARSED_PARTIAL:
+            printf("token | partial | ");
+            break;
+          case PARSED_NOTHING:
+            printf("token | nothing | ");
+            break;
+          case PARSED_OK:
+            printf("token |  ready  | ");
+            break;
+          case PARSED_ERROR:
+            printf("token |  error  | ");
+            break;
+        }
+        puts(buf);
+      }
+
+      if (token->state == PARSED_PARTIAL) {
+        continue;
+      }
+
       if (iteration > 0) {
         new_text[j++] = ' ';
         if (!flat) {
@@ -223,7 +320,6 @@ char* hook (const char* command)
         }
       }
 
-      // new_text[j++] = '`';
       write_token:
       {
         const void *src  = &cmd->data[token->start];
@@ -261,13 +357,12 @@ char* hook (const char* command)
           j += fmt.bytes;
         }
       }
-      // new_text[j++] = '`';
 
 
       flat = strncmp("-o", &cmd->data[token->start], token->size) == 0;
       iteration += 1;
     }
-
+    
     return new_text;
   } else {
     return NULL; 
