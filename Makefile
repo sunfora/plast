@@ -15,7 +15,12 @@ COLORIZE=
 COLORIZE+=-shared
 COLORIZE+=-fPIC
 COLORIZE+=-g3
-COLORIZE+=-O2
+ifeq ($(strip $(DEBUG)),1)
+  COLORIZE+=-O0 
+  COLORIZE+=-fno-eliminate-unused-debug-types
+else
+  COLORIZE+=-O2
+endif
 COLORIZE+=-march=x86-64-v3
 COLORIZE+=-fno-omit-frame-pointer
 COLORIZE+=-fno-strict-aliasing
@@ -45,4 +50,4 @@ libplast.so: plast.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(LDLIBS)
 
 colorize.so: colorize.c
-	$(CC) $(COLORIZE) -o $@ $<
+	gcc $(COLORIZE) -o $@ $<
