@@ -15,15 +15,27 @@ struct shell_token
   char    *content;
   int32_t  color;
   int64_t  state;
+  bool     scan_resumed;
+  int64_t  quote;
+};
+
+enum syntax_type: uint8_t {
+  EMPTY  = 0,
+  TOKEN  = 1,
+  PUNCT  = 2,
+  UQUOTE = 3,
+  DQUOTE = 4,
+  SQUOTE = 5
 };
 
 struct syntax
 {
   union {
-    uint8_t slot[8];
-    int64_t all;
+    enum syntax_type slot[8];
+    uint64_t         all;
   } layers;
-  void*   lookup;
+  uint64_t  depth;
+  void     *ast;
 };
 
 enum parse_state : uint8_t {
@@ -33,11 +45,6 @@ enum parse_state : uint8_t {
   PARSED_PARTIAL = 4
 };
 
-enum syntax_type: uint8_t {
-  EMPTY = 0,
-  TOKEN = 1,
-  PUNCT = 2
-};
 
 struct terminal_color
 {
@@ -111,128 +118,176 @@ bool token_not_initialized(struct shell_token *self)
 
 static
 bool next_token (struct syntax      *syntax,
-                 struct shell_token *iter,
+                 struct shell_token *sent_iter,
                  struct string      *text)
 {
-  struct shell_token  token_stack;
-  struct shell_token *token = &token_stack;
-  init_token(token);
+  struct shell_token  iter_stack;
+  struct shell_token *iter = &iter_stack;
+
+  *iter = *sent_iter;
   
   int64_t iter_stop = 0;
   int64_t i         = 0;
+
+  if (iter->stop >= text->size) {
+    goto send_back_nothing;
+  }
+
+  bool quote_found = false;
   
-  iter_stop = iter->stop;
-
-  for (i = iter_stop; i < text->size; i++)
-  slide_towards_token:
+  scan_text:
+  for (i = iter->stop; i < text->size; i++)
   {
-    if (text->data[i] != ' ') 
-    parse_token:
-    {
+    quote_found = false;
 
-      token->start = i;
-      switch (text->data[i]) 
-      {
-        case '"': 
-        {
-          i = token->start;
-          parse_double_quote:
-          {
-            i += 1;
-            for (; i < text->size; i++) {
-              if (text->data[i] == '"') {
-                token->stop = i + 1;
-                goto send_back_partial;
-              }
-            }
-            goto send_back_error;
-          } 
-        } break;
-        case '\'': 
-        {
-          i = token->start;
-          parse_single_quote:
-          {
-            i += 1;
-            for (; i < text->size; i++) {
-              if (text->data[i] == '\'') {
-                token->stop = i + 1;
-                goto send_back_partial;
-              }
-            } 
-            goto send_back_error;
-          }
-        } break;
-        default: 
-        parse_unquoted:
-        {
-          for (i = token->start; i < text->size; i++) {
-            if (text->data[i] == ' ') {
-              token->stop = i;
-              goto send_back_ok;
-            }
-            if (text->data[i] == '"') {
-              token->stop = i;
-              goto send_back_partial;
-            }
-            if (text->data[i] == '\'') {
-              token->stop = i;
-              goto send_back_partial;
-            }
-          }
-          token->stop = text->size;
-          goto send_back_ok;
-        } 
-      }
-      goto send_back_error; 
-    } 
-    else 
-    whitespace:
+    struct syntax *pre = &syntax[i - 1];
+    struct syntax *upd = &syntax[i + 0];
+    
+    inherit_previous_layer:
     {
-      if (iter->state == PARSED_PARTIAL) {
-        token->stop = i;
-        goto send_back_ok;
+      *upd = *pre;
+    }
+
+    uint64_t pre_rest = pre->layers.all >> 8;
+    uint64_t upd_rest = upd->layers.all >> 8;
+    
+    uint32_t pre_last_left    = __builtin_clzll(pre_rest) & (~0b111);
+    uint32_t pre_last_shift   = 56 - pre_last_left;
+    enum syntax_type pre_last = pre_rest >> pre_last_shift;
+
+    update_alternating_base: 
+    {
+      uint8_t is_punct = (text->data[i] == ' ');
+      if (is_punct && !iter->quote) {
+        upd->layers.all = PUNCT;
+        upd->ast        = NULL;
+        upd->depth      = 0;
+      } else {
+        upd->layers.slot[0] = TOKEN;
       }
-      continue;
+    }
+    
+    if (upd->layers.slot[0] == TOKEN)
+    update_stacked_layers:
+    {
+      drop_layer:
+      switch (pre_last) 
+      {
+        case DQUOTE:
+        {
+          if (iter->quote == 2 && text->data[i - 1] == '"') {
+            upd_rest ^= (pre_last << pre_last_shift);
+          }
+        } break;
+        case SQUOTE:
+        {
+          if (iter->quote == 2 && text->data[i - 1] == '\'') {
+            upd_rest ^= (pre_last << pre_last_shift);
+          }
+        } break;
+      }
+
+      uint64_t upd_last_left  = __builtin_clzll(upd_rest) & (~0b111);
+      uint64_t upd_last_shift = 64 - upd_last_left;
+
+      insert_layer:
+      {
+        enum syntax_type type = EMPTY;
+
+        if (text->data[i] != ' ') {
+          type = UQUOTE;
+        }
+        switch (text->data[i]) {
+          case '"':
+          {
+            type = DQUOTE;
+            quote_found = true;
+          } break;
+          case '\'':
+          {
+            type = SQUOTE;
+            quote_found = true;
+          } break;
+        }
+        if (pre_last < type) {
+          upd_rest |= (type << upd_last_shift);
+        }
+      }
+      
+      upd->layers.all &= 0xff;
+      upd->layers.all |= (upd_rest << 8);
+    }
+
+    negotiate:
+    {
+      if (!iter->scan_resumed) {
+
+        uint32_t upd_last_left    = __builtin_clzll(upd_rest) & (~0b111);
+        uint32_t upd_last_shift   = 56 - upd_last_left;
+        enum syntax_type upd_last = upd_rest >> upd_last_shift;
+        
+        if (quote_found) {
+          iter->quote += 1;
+          printf("%ld quote!\n", iter->quote);
+        } else if (upd_last != SQUOTE && upd_last != DQUOTE) {
+          iter->quote = 0;
+        }
+        
+        uint64_t pre_type      = pre->layers.all;
+        uint64_t upd_type      = upd->layers.all;
+        uint8_t  pre_base_type = pre->layers.slot[0];
+        uint8_t  upd_base_type = upd->layers.slot[0];
+
+        if (pre_base_type != upd_base_type) {
+          iter->stop = i;
+          goto send_back_ok;
+        }
+        if (pre_type != upd_type) {
+          iter->stop = i;
+          goto send_back_partial;
+        }
+      }
+      iter->scan_resumed = false;
     }
   }
-  
+  iter->stop = text->size; 
+
+  send_back_ok:
+  {
+    if (iter->state != PARSED_PARTIAL) {
+      iter->start = sent_iter->stop;
+    }
+    iter->state        = PARSED_OK;
+    iter->size         = iter->stop - iter->start;
+    iter->scan_resumed = true;
+    memcpy(sent_iter, iter, sizeof(struct shell_token));
+    return true;
+  }
+
   send_back_nothing:
   {
-    token->state = PARSED_NOTHING;
+    iter->state = PARSED_NOTHING;
+    memcpy(sent_iter, iter, sizeof(struct shell_token));
     return false;
   }
 
   send_back_error:
   {
-    token->state   = PARSED_ERROR;
-    token->size    = token->stop - token->start;
-    token->content = iter->content;
-    memcpy(iter, token, sizeof(struct shell_token));
+    iter->state   = PARSED_ERROR;
+    iter->size    = iter->stop - iter->start;
+    memcpy(sent_iter, iter, sizeof(struct shell_token));
     return false;
   }
   
   send_back_partial:
-  { 
-    if (iter->state == PARSED_PARTIAL) {
-      token->start = iter->start;
-    }
-    token->state   = PARSED_PARTIAL;
-    token->size    = token->stop - token->start;
-    token->content = iter->content;
-    memcpy(iter, token, sizeof(struct shell_token));
-    return true;
-  }
-
-  send_back_ok:
   {
-    if (iter->state == PARSED_PARTIAL) {
-      token->start = iter->start;
+    if (iter->state != PARSED_PARTIAL) {
+      iter->start = sent_iter->stop;
     }
-    token->state   = PARSED_OK;
-    token->size    = token->stop - token->start;
-    token->content = iter->content;
-    memcpy(iter, token, sizeof(struct shell_token));
+    iter->state        = PARSED_PARTIAL;
+    iter->size         = iter->stop - iter->start;
+    iter->scan_resumed = true;
+    memcpy(sent_iter, iter, sizeof(struct shell_token));
     return true;
   }
 }
@@ -248,8 +303,10 @@ char* hook (const char* command)
     struct string *cmd       = &cmd_stack;
     int   new_size     = cmd->size * 3;
     char* new_text     = gmk_alloc(new_size);
+    
+    struct syntax *syntax_memory = malloc((cmd->size + 1)* sizeof(struct syntax));
+    struct syntax *syntax = syntax_memory + 1;
 
-    struct syntax* syntax = malloc(cmd->size * sizeof(struct syntax));
     memset(syntax, 0, cmd->size * sizeof(struct syntax));
     
     int j = 0;
@@ -257,15 +314,18 @@ char* hook (const char* command)
     struct shell_token  token_stack;
     struct shell_token *token = &token_stack;
     init_token(token);
+    token->scan_resumed = true;
     
     int32_t iteration = 0;
     bool    flat      = false;
 
     fetch_event:
     while (next_token(syntax, token, cmd)) {
-      
+      if (syntax[token->start].layers.slot[0] == PUNCT) {
+        continue;
+      }
       log:
-      if (0) {
+      if (1) {
         int buf_size = token->size + 1;
         char buf[buf_size];
         memset(buf, 0, buf_size);
@@ -362,7 +422,7 @@ char* hook (const char* command)
       flat = strncmp("-o", &cmd->data[token->start], token->size) == 0;
       iteration += 1;
     }
-    
+    free(syntax_memory);
     return new_text;
   } else {
     return NULL; 
